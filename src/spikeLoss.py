@@ -103,6 +103,60 @@ class spikeLoss(torch.nn.Module):
         
         return 1/2 * torch.sum(error**2) * self.simulation['Ts']
     
+    def weightedNumSpikes(self, spikeOut, desiredClass, spikeWeights = None, numSpikesScale=1000):
+        
+        '''
+        Calculates spike loss based on weighted number of spikes. Weights can be from any function (normalization is recommended)
+        and must be in the range [1, simulation['tSample']+1]. For better early classification, use monotonically decreasing function.
+
+        .. math::
+            e(t) = frac{acutalSpikeCount w(t) - desiredSpikeCount w(t)}\\
+            
+            E &= \\int_0^T e(t)^2 \\text{d}t
+
+        Arguments:
+            * ``spikeOut`` (``torch.tensor``): spike tensor
+            * ``desiredClass`` (``torch.tensor``): one-hot encoded desired class tensor. Time dimension should be 1 and rest of the tensor dimensions should be same as ``spikeOut``.
+
+        Usage:
+
+        >>> loss = error.weightedNumSpikes(spikeOut, target)
+        '''
+    
+        assert self.errorDescriptor['type'] == 'WeightedNumSpikes', "Error type is not WeightedNumSpikes"
+
+        T = self.simulation['tSample'] 
+        batch_size, output_size = desiredClass.shape[:2]
+        dev = spikeOut.device
+        
+        # generate weights from monotonically decreasing function used in the paper:
+        t = np.arange(1, T+1, dtype=float)
+        a = 0.004623869180255456
+        b = -4.373487046824739e-08
+        spikeWeights = a + b*t**2
+        
+        spikeWeights = torch.FloatTensor( a + b*t**2 )
+        sW = spikeWeights.expand([batch_size, output_size, 1, 1, T]).clone().to(dev)
+        sW.requires_grad = False
+
+        TruePositive = spikeWeights.sum().to(dev)
+        FalsePositive = spikeWeights.mean()*self.errorDescriptor['tgtSpikeCount'][False]
+        FalsePositive = FalsePositive.to(dev)
+
+        # get weighted spike output
+        weightedSpikeOut = torch.mul(spikeOut, sW)
+
+        actualSpikes = torch.sum(weightedSpikeOut, 4, keepdim=True) * self.simulation['Ts']
+        desiredSpikes = torch.where(desiredClass==True, TruePositive, FalsePositive).to(dev)
+
+        errorSpikeCount = (actualSpikes - desiredSpikes) / T * numSpikesScale
+
+        targetRegion = torch.zeros(spikeOut.shape).to(dev)
+        targetRegion[:,:,:,:,:T] = 1 # all samples as target region
+        error = errorSpikeCount * targetRegion
+        
+        return 1/2 * torch.sum( error**2)  * self.simulation['Ts']
+    
     def probSpikes(spikeOut, spikeDesired, probSlidingWindow = 20):
         assert self.errorDescriptor['type'] == 'ProbSpikes', "Error type is not ProbSpikes"
         pass
